@@ -1,6 +1,6 @@
 function results = MainTwoLayerScript()
-% Fit one shared [alpha_f, alpha_s, R] for each spot
-% Edit the user input block, then run 
+% Purpose: Fit one shared [alpha_f, alpha_s, R] for each spot
+% Instructions: Edit the user input block, then run 
 
 %% USER INPUTS 
     % Files
@@ -36,7 +36,7 @@ function results = MainTwoLayerScript()
         S.p0 = [6.7e-5,2.7e-5,1e-8];  % [m^2/s, m^2/s, m^2 K/W]
         S.pLower = [1.5e-5,1.5e-5,1e-14]; % Lower parameter bounds
         S.pUpper = [1e-1,1e-1,1e-2]; % Upper parameter bounds
-        S.fitParameters = [true,false,false]; % Fit [alpha_f, alpha_s, R]
+        S.fitParameters = [true,true,true]; % Fit [alpha_f, alpha_s, R] for testing use
     % Fourier calculation
         S.Nw = 256; % even number of frequency samples
         S.wmin = 2*pi*1e3; % [rad/s]
@@ -66,7 +66,7 @@ function results = MainTwoLayerScript()
         error("TGS:Data","No complete calibrated POS/NEG/baseline sets were found.");
     end
 
-%% 2. FIT EACH SPOT
+%% FIT EACH SPOT
     spotList = unique([traces.spot]);
     spotResults = cell(numel(spotList),1);
 
@@ -75,7 +75,7 @@ function results = MainTwoLayerScript()
         spotTraces = traces([traces.spot] == spot);
         fit = fitTwoLayerTGS(spotTraces,S);
 
-    %% 3. RECONSTRUCTION
+    %% RECONSTRUCTION
         r = fit.r;
         p = 10.^fit.x;
         spotResult.spot = spot;
