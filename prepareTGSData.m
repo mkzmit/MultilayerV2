@@ -110,8 +110,6 @@ function traces = prepareTGSData(S)
             files(end+1) = f;
     end
     
-    
-    
     % Separate ordinary measurement files from baseline
         measurement = find(~[files.baseline]);
         baseline = find([files.baseline]);
