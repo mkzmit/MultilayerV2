@@ -17,11 +17,18 @@ function fit = fitTwoLayerTGS(traces,S)
     thermalModel = @(x,xdata) stackedThermalModel( ...
         x,thermalTraces,S,thermalWeights);
 
-    xThermal = lsqcurvefit(thermalModel,x0,xdata,thermalData,lb,ub,options);
+    xThermal = lsqcurvefit( ...
+        thermalModel,x0,xdata,thermalData,lb,ub,options);
+    xThermal = xThermal(:).';
+
     [~,thermalState] = stackedThermalModel( ...
         xThermal,thermalTraces,S,ones(size(thermalWeights)));
+
     [frequency0,tau0] = initialAcousticParameters( ...
-        traces,xThermal,thermalState,S);
+        traces,thermalState,S);
+    frequency0 = frequency0(:).';
+    tau0 = tau0(:).';
+
     fitTraces = finalFitTraces(traces,frequency0,S);
 
     parameterCount = sum(fitMask);
@@ -40,14 +47,19 @@ function fit = fitTwoLayerTGS(traces,S)
 
     [yfit,rebuilt] = stackedCompositeModel( ...
         x,fitTraces,S,ones(size(weights)),frequency0);
-    measured = vertcat(fitTraces.y);
+        measured = vertcat(fitTraces.y);
+    measured = measured(:);
 
     fittedX = xFixed;
     fittedX(fitMask) = x(1:parameterCount);
+
     fit.x = fittedX;
-    fit.fullX = x(:).';
+    fit.p = 10.^fittedX;
+    fit.optimizerX = x(:).';
+    fit.fullX = fit.optimizerX; 
     fit.resnorm = resnorm;
-    fit.r = yfit-measured;
+
+    fit.r = measured-yfit;
     fit.objectiveResidual = objectiveResidual;
     fit.yfit = yfit;
     fit.traces = rebuilt;
@@ -64,13 +76,16 @@ function fit = fitTwoLayerTGS(traces,S)
     fit.atUpperBound(fitMask) = ...
         abs(fit.x(fitMask)-ub) <= S.dx;
 
-    degreesOfFreedom = max(numel(objectiveResidual)-numel(x),1);
+    linearParameterCount = sum([rebuilt.linearRank]);
+    degreesOfFreedom = max( ...
+        numel(objectiveResidual)-numel(x)-linearParameterCount,1);
+
     covariance = (resnorm/degreesOfFreedom)*pinv(full(J.'*J));
     xError = sqrt(max(diag(covariance),0));
-    p = 10.^fit.x;
+
     fit.parameterError = nan(1,3);
-    fit.parameterError(fitMask) = log(10)*p(fitMask).* ...
-        xError(1:parameterCount).';
+    fit.parameterError(fitMask) = ...
+        log(10)*fit.p(fitMask).*xError(1:parameterCount).';
 
     % J(:,j)=dr/dx_j
         fit.sensitivity = nan(1,3);
@@ -78,21 +93,32 @@ function fit = fitTwoLayerTGS(traces,S)
 end
 
 function fitTraces = finalFitTraces(traces,frequency,S)
-% Begin the final fit after the selected acoustic null-point interval
+% Begin the final fit at a prescribed time relative to pump arrival.
+% This assumes each trace has already been shifted so that t = 0 is the
+% pump-arrival time.
+
     fitTraces = traces;
 
     for g = 1:numel(traces)
-        [~,maximum] = max(traces(g).y);
-        startTime = traces(g).t(maximum) + ...
-            S.fitStartHalfPeriods/(2*frequency(g));
-        use = traces(g).t >= startTime;
+        t = traces(g).t(:);
+        y = traces(g).y(:);
 
-        if sum(use) < 10
-            error("TGS:FitWindow","The final fit window is too short.");
+        if ~isfinite(frequency(g)) || frequency(g) <= 0
+            error("TGS:AcousticFrequency", ...
+                "Trace %d has an invalid acoustic frequency.",g);
         end
 
-        fitTraces(g).t = traces(g).t(use);
-        fitTraces(g).y = traces(g).y(use);
+        startTime = S.fitStartTime + ...
+            S.fitStartHalfPeriods/(2*frequency(g));
+        use = t >= startTime;
+
+        if nnz(use) < 10
+            error("TGS:FitWindow", ...
+                "The final fit window for trace %d contains fewer than 10 points.",g);
+        end
+
+        fitTraces(g).t = t(use);
+        fitTraces(g).y = y(use);
     end
 end
 
@@ -111,41 +137,106 @@ function options = fittingOptions(S)
 end
 
 function thermalTraces = smoothThermalTraces(traces,S)
-% Build the smooth background traces used by the initial thermal fit
+% Build smooth background traces for the initial thermal fit.
+
     thermalTraces = traces;
 
     for g = 1:numel(traces)
-        window = max(3,round(S.smoothTime/median(diff(traces(g).t))));
-        thermalTraces(g).y = movmean(traces(g).y,window);
+        t = traces(g).t(:);
+        y = traces(g).y(:);
+        timeSteps = diff(t);
+
+        if numel(t) < 3 || any(~isfinite(t)) || ...
+                any(~isfinite(y)) || any(timeSteps <= 0)
+            error("TGS:Trace", ...
+                "Trace %d must contain finite, increasing time samples.",g);
+        end
+
+        dt = median(timeSteps);
+        window = max(3,round(S.smoothTime/dt));
+
+        % Use an odd window so the moving average is centered on a sample.
+        if mod(window,2) == 0
+            window = window+1;
+        end
+
+        window = min(window,numel(y));
+        if mod(window,2) == 0
+            window = window-1;
+        end
+
+        thermalTraces(g).t = t;
+        thermalTraces(g).y = movmean(y,window,"Endpoints","shrink");
     end
 end
 
 function [frequency0,tau0] = initialAcousticParameters( ...
-        traces,xThermal,thermalState,S)
-% Estimate each SAW frequency from the thermal-fit residual spectrum
-    frequency0 = zeros(1,numel(traces));
-    tau0 = repmat(S.tau0,1,numel(traces));
-    p = physicalParameters(xThermal,S);
+        traces,thermalState,S)
+% Estimate each fixed SAW frequency from the thermal-fit residual spectrum.
 
-    for g = 1:numel(traces)
-        t = traces(g).tFull;
-        y = traces(g).yFull;
-        [Theta,Uz] = TwoLayerModel(t,traces(g).Lambda,p,S);
-        D = [Theta,Uz,ones(size(t))];
-        background = D*thermalState(g).c;
+    traceCount = numel(traces);
+    frequency0 = zeros(1,traceCount);
+    tau0 = repmat(S.tau0,1,traceCount);
+
+    for g = 1:traceCount
+        t = traces(g).t(:);
+        y = traces(g).y(:);
+        background = thermalState(g).yfit(:);
+
+        if numel(t) ~= numel(y) || numel(y) ~= numel(background)
+            error("TGS:AcousticSpectrum", ...
+                "Thermal background and measured trace %d have different lengths.",g);
+        end
+
+        timeSteps = diff(t);
+        dt = median(timeSteps);
+
+        if numel(t) < 4 || any(~isfinite(timeSteps)) || ...
+                dt <= 0 || max(abs(timeSteps-dt)) > 1e-3*dt
+            error("TGS:Sampling", ...
+                "Trace %d must be uniformly sampled for FFT peak finding.",g);
+        end
+
         residual = y-background;
-        dt = median(diff(t));
         derivative = diff(residual)/dt;
-        derivative = derivative-mean(derivative);
-        nfft = 2^nextpow2(max(2^18,numel(derivative)));
-        spectrum = abs(fft(derivative,nfft)).^2;
-        frequency = (0:nfft-1).'/(nfft*dt);
-        use = frequency >= S.sawFrequencyBounds(1) & ...
-            frequency <= S.sawFrequencyBounds(2);
-        candidate = frequency(use);
+        derivative = detrend(derivative,1);
+
+        sampleCount = numel(derivative);
+        window = 0.5-0.5*cos( ...
+            2*pi*(0:sampleCount-1).'/(sampleCount-1));
+        derivative = derivative.*window;
+
+        % Moderate zero padding improves peak localization without creating
+        % additional physical frequency resolution.
+        nfft = 2^nextpow2(max(4*sampleCount,1024));
+        fullSpectrum = abs(fft(derivative,nfft)).^2;
+
+        positiveBins = (0:floor(nfft/2)).';
+        frequency = positiveBins/(nfft*dt);
+        spectrum = fullSpectrum(positiveBins+1);
+
+        nyquistFrequency = 1/(2*dt);
+        lowerFrequency = max(S.sawFrequencyBounds(1),0);
+        upperFrequency = min( ...
+            S.sawFrequencyBounds(2),nyquistFrequency);
+
+        if lowerFrequency >= upperFrequency
+            error("TGS:AcousticBounds", ...
+                "The SAW search interval for trace %d lies above Nyquist.",g);
+        end
+
+        use = frequency >= lowerFrequency & ...
+            frequency <= upperFrequency;
+
+        if ~any(use)
+            error("TGS:AcousticBounds", ...
+                "No FFT bins lie inside the SAW search interval for trace %d.",g);
+        end
+
+        candidateFrequency = frequency(use);
         candidateSpectrum = spectrum(use);
         [~,peak] = max(candidateSpectrum);
-        frequency0(g) = candidate(peak);
+        frequency0(g) = candidateFrequency(peak);
     end
 end
 
@@ -158,8 +249,8 @@ function [yfit,rebuilt] = stackedThermalModel(x,traces,S,weights)
     row = 0;
 
     for g = 1:numel(traces)
-        t = traces(g).t;
-        y = traces(g).y;
+        t = traces(g).t(:);
+        y = traces(g).y(:);
         [Theta,Uz] = TwoLayerModel(t,traces(g).Lambda,p,S);
         D = [Theta,Uz,ones(size(t))];
         [yg,c] = linearFit(D,y);
@@ -170,7 +261,7 @@ function [yfit,rebuilt] = stackedThermalModel(x,traces,S,weights)
         rebuilt(g).Uz = Uz;
         rebuilt(g).c = c;
         rebuilt(g).yfit = yg;
-        rebuilt(g).r = yg-y;
+        rebuilt(g).r = y-yg;
     end
 end
 
@@ -187,8 +278,8 @@ function [yfit,rebuilt] = stackedCompositeModel( ...
     row = 0;
 
     for g = 1:traceCount
-        t = traces(g).t;
-        y = traces(g).y;
+        t = traces(g).t(:);
+        y = traces(g).y(:);
         [Theta,Uz] = TwoLayerModel(t,traces(g).Lambda,p,S);
         decay = exp(-t/tau(g));
         sine = decay.*sin(2*pi*frequency(g)*t);
@@ -204,25 +295,49 @@ function [yfit,rebuilt] = stackedCompositeModel( ...
         rebuilt(g).thermalFit = D(:,[1,2,5])*c([1,2,5]);
         rebuilt(g).acousticFit = D(:,3:4)*c(3:4);
         rebuilt(g).yfit = yg;
-        rebuilt(g).r = yg-y;
+        rebuilt(g).r = y-yg;
+        rebuilt(g).linearRank = rank(D);
         rebuilt(g).acousticFrequency = frequency(g);
         rebuilt(g).acousticDamping = tau(g);
     end
 end
 
 function p = physicalParameters(x,S)
-% Combine fitted parameters with values held fixed at their supplied inputs
-    fullX = log10(S.p0);
-    fullX(logical(S.fitParameters)) = x;
+% Combine fitted parameters with values held fixed at their supplied inputs.
+
+    fitMask = logical(S.fitParameters(:).');
+    x = x(:).';
+
+    if numel(x) ~= nnz(fitMask)
+        error("TGS:Parameters", ...
+            "The optimizer supplied the wrong number of fitted parameters.");
+    end
+
+    fullX = log10(S.p0(:).');
+    fullX(fitMask) = x;
     p = 10.^fullX;
 end
 
 function [yfit,c] = linearFit(D,y)
-% Solve the linear amplitudes after scaling each model component
+% Solve the linear amplitudes after scaling each model component.
+
+    y = y(:);
+
+    if size(D,1) ~= numel(y)
+        error("TGS:ModelSize", ...
+            "The design matrix and measured trace have different lengths.");
+    end
+
+    if any(~isfinite(D),"all") || any(~isfinite(y))
+        error("TGS:Model", ...
+            "The model response and measured data must be finite.");
+    end
+
     scale = vecnorm(D,2,1);
 
-    if any(~isfinite(D),"all") || any(~isfinite(scale)) || any(scale == 0)
-        error("TGS:Model","The bounded model response is not finite.");
+    if any(~isfinite(scale)) || any(scale == 0)
+        error("TGS:Model", ...
+            "At least one model component has zero or nonfinite magnitude.");
     end
 
     Ds = D./scale;
@@ -232,14 +347,24 @@ function [yfit,c] = linearFit(D,y)
 end
 
 function weights = traceWeights(traces)
-% Give every grating spacing equal relative weight in the fit
+% Normalize each trace so every grating spacing contributes equal signal
+% energy to the nonlinear objective.
+
     weights = zeros(numel(traces),1);
 
     for g = 1:numel(traces)
-        scale = norm(traces(g).y-mean(traces(g).y));
+        y = traces(g).y(:);
 
-        if ~isfinite(scale) || scale == 0
-            error("TGS:DataScale","Trace %d has no finite signal variation.",g);
+        if any(~isfinite(y))
+            error("TGS:DataScale", ...
+                "Trace %d contains nonfinite measured values.",g);
+        end
+
+        scale = norm(y-mean(y));
+
+        if scale == 0
+            error("TGS:DataScale", ...
+                "Trace %d has no signal variation.",g);
         end
 
         weights(g) = 1/scale;
@@ -247,14 +372,16 @@ function weights = traceWeights(traces)
 end
 
 function ydata = stackedData(traces,weights)
-% Stack the weighted measured data for MATLAB nonlinear least squares
+% Stack the weighted measured data for nonlinear least squares.
+
     n = sum(arrayfun(@(g) numel(g.y),traces));
     ydata = zeros(n,1);
     row = 0;
 
     for g = 1:numel(traces)
-        rows = row+(1:numel(traces(g).y));
-        ydata(rows) = weights(g)*traces(g).y;
+        y = traces(g).y(:);
+        rows = row+(1:numel(y));
+        ydata(rows) = weights(g)*y;
         row = rows(end);
     end
 end
