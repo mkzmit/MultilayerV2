@@ -48,6 +48,7 @@ function results = MainTwoLayerScript()
         S.ftol = 1e-8;
         S.xtol = 1e-8;
         S.gtol = 1e-8;
+        S.boundTolerance = 1e-6;
         S.dx = 2e-3; % finite-difference step in log10 coordinates
         S.display = "iter";
     % Acoustic fitting
