@@ -40,15 +40,16 @@ function [T,uz] = TwoLayerModel (t,Lambda,p,S)
                          1, q*L-3+4*nu_f, -exp2qL, exp2qL*(4*nu_f-q*L-3), -1,          3-4*nu_s-q*L; ...
                          1, q*L,          exp2qL,  q*L*exp2qL,            -1,          -q*L; ...
                          1, q*L-2+2*nu_f, exp2qL,  exp2qL*(q*L+2-2*nu_f), -shearRatio, (2-2*nu_s-q*L)*shearRatio; ...
-                         1, q*L-1+2*nu_f, -exp2qL, exp2qL*(2*nu_f-q*L-1), -shearRatio, (1-2*nu_s-q*L)*shearRatio];
+                        1, q*L-1+2*nu_f, -exp2qL, exp2qL*(2*nu_f-q*L-1), -shearRatio, (1-2*nu_s-q*L)*shearRatio];
 
-    % Solve the coupled thermal and quasi-static elastic problems
+       elasticSolver = decomposition(elasticMatrix,"lu");    % Solve the coupled thermal and quasi-static elastic problems
+      
         for frequencyIndex = 1:nPositive
             currentOmega = omegaPositive(frequencyIndex);
             beta_f = sqrt(q^2 + 1i*currentOmega/alpha_f);
             beta_s = sqrt(q^2 + 1i*currentOmega/alpha_s);
-            r_f = beta_f^2 - q^2;
-            r_s = beta_s^2 - q^2;
+            r_f = 1i*currentOmega/alpha_f;
+            r_s = 1i*currentOmega/alpha_s;
 
             conductivityRatio = ks*beta_s/(kf*beta_f);
             interfaceFactor = 1 - conductivityRatio + ks*beta_s*R;
@@ -56,11 +57,9 @@ function [T,uz] = TwoLayerModel (t,Lambda,p,S)
 
             A_f = S.Q0/(kf*beta_f) * (2*conductivityRatio + interfaceFactor)/thermalDenominator;
             B_f = S.Q0/(kf*beta_f) * interfaceFactor*exp(-2*beta_f*L)/thermalDenominator;
-            A_s = S.Q0/(kf*beta_f) * 2*exp((beta_s - beta_f)*L)/thermalDenominator;
-
             A_f_interface = A_f*exp((q - beta_f)*L);
             B_f_interface = B_f*exp((q + beta_f)*L);
-            A_s_interface = A_s*exp((q - beta_s)*L);
+            A_s_interface = S.Q0/(kf*beta_f) *2*exp((q - beta_f)*L)/thermalDenominator;
 
             % Thermal forcing of the elastic system
                 elasticForcing = [ thermo_f*beta_f*(A_f - B_f)/r_f; ...
@@ -71,7 +70,7 @@ function [T,uz] = TwoLayerModel (t,Lambda,p,S)
                                    thermo_f*q*(A_f_interface + B_f_interface)/r_f - shearRatio*thermo_s*q*A_s_interface/r_s ];
 
             % Solve for the six elastic coefficients 
-                elasticCoefficients = elasticMatrix\elasticForcing;
+                elasticCoefficients = elasticSolver\elasticForcing;
 
             % Surface values at z = 0
                 temperaturePositive(frequencyIndex) = A_f + B_f;
@@ -82,12 +81,12 @@ function [T,uz] = TwoLayerModel (t,Lambda,p,S)
         temperatureSpectrum = [conj(fliplr(temperaturePositive)), temperaturePositive];
         displacementSpectrum = [conj(fliplr(displacementPositive)), displacementPositive];
 
-        T = real(inverseFourierPiecewiseLinear( omega, temperatureSpectrum, t))/(2*pi);
-    uz = real(inverseFourierPiecewiseLinear( omega, displacementSpectrum, t))/(2*pi);
+      T = real(inverseFourierPiecewiseLinear(omega,temperatureSpectrum,t))/(2*pi);
+      uz = real(inverseFourierPiecewiseLinear(omega,displacementSpectrum,t))/(2*pi);
 end
 
 function x = inverseFourierPiecewiseLinear(omega, spectrum, t)
-    % preforms an inverse fourier transform using a piecewise linear method
+   % Performs an inverse Fourier transform using piecewise-linear interpolation.    
     omega = omega(:).';
     spectrum = spectrum(:).';
     t = t(:);
